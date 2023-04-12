@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@kihonvn/backend",
   "version": "0.1.1",
   "author": {
@@ -13,5 +13,11 @@
   "homepage": "https://github.com/kihonvn/backend",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
+  },
+  "devDependencies": {
+    "jest": "^29.5.0"
+  },
+  "scripts": {
+    "test": "jest"
   }
 }

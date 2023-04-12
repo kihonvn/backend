@@ -1,0 +1,482 @@
+﻿package com.peace.framework.dao;
+
+import java.sql.Connection;
+import java.sql.Date;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.apache.log4j.Logger;
+
+import com.peace.framework.util.exception.TaskException;
+import com.peace.marketsolution.canonical.Meter;
+import com.peace.marketsolution.canonical.Meters;
+import com.peace.marketsolution.canonical.Register;
+import com.peace.marketsolution.canonical.Registers;
+import com.peace.marketsolution.canonical.Service;
+import com.peace.marketsolution.canonical.Services;
+import com.peace.marketsolution.canonical.Transaction;
+
+/**
+ * EnergyDAO is a database access object that allows persistence of data
+ * into the table transaction in the energydb schema 
+ *
+ *
+ */
+public class EnergyDAO extends AbstractDAO<Transaction> {
+
+	private static final String MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME = "NMI";
+
+	private static Logger logger = Logger.getLogger(EnergyDAO.class);
+
+	/**
+	 * Constructor
+	 */
+	public EnergyDAO() {
+		super();
+	}
+	
+	private static final String SELECT_PREMNUM_FROM_UNIQUE_SERVICE_ID =
+			" select premnum from ENERGYDB.pm_extref_mktid " + 
+			"     where ext_sdp_code_upper = ?    " + 
+			"     and effective_from <= SYSDATE   " + 
+			"     and (   effective_to IS NULL    " + 
+			"          or effective_to >= SYSDATE " + 
+			"     )";
+					
+	public Integer getPremnumFromUniqueServiceId(String uniqueServiceId) throws TaskException {
+		
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		Integer premnum        = -1;
+		
+		try {
+			conn = getEnergyConnection();
+			stmt = conn.prepareStatement(SELECT_PREMNUM_FROM_UNIQUE_SERVICE_ID);
+			stmt.setString(1, uniqueServiceId);
+			
+			rs = stmt.executeQuery();
+
+			while (rs.next()) {
+				premnum = rs.getInt(1);
+			}
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting the unique service identifier on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+
+		return premnum;
+	}
+
+	@Override
+	protected Transaction readNext(ResultSet rs) throws TaskException {
+		return null;
+	}
+
+	private static final String SELECT_MIT_FROM_PREMNUM =
+			"SELECT distinct(participant_code) FROM PM_SDP_ROLE WHERE sdp_code in " +
+			" (SELECT sdp_code FROM PM_SVC_DELIV_PT WHERE ref_no1 = ? AND sdp_type = 'M' " +
+				" AND ref_no2 = (SELECT min(servicenum) from eb_meter_install WHERE premnum = ? AND " +
+				" status_meter ='C')" +
+			" ) " +
+			" AND participant_role = 'MIT'" +
+			" AND effective_to is null";
+	
+	public String getMeterInstallationTypeFromPremnum(Integer premnum) throws TaskException{
+		
+		Connection conn		         = null;
+		PreparedStatement stmt       = null;
+		ResultSet rs		         = null;
+		String meterInstallationType = null;
+		
+		try {
+			conn = getEnergyConnection();
+			stmt = conn.prepareStatement(SELECT_MIT_FROM_PREMNUM);
+			stmt.setInt(1, premnum);
+			stmt.setInt(2, premnum);
+			
+			rs = stmt.executeQuery();
+
+			while (rs.next()) {
+				meterInstallationType = rs.getString(1);
+			}
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting the premnum on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+
+		return meterInstallationType;
+	}
+
+	private static final String SELECT_NMI_CLASSIFICATION_FROM_PREMNUM =
+			"select participant_code  " + 
+			"	from pm_sdp_role r, pm_svc_deliv_pt s " + 
+			"	where s.ref_no1 = ? " + 
+			"	and s.sdp_type = 'P' " + 
+			"	and s.sdp_code = r.sdp_code " + 
+			"	and r.participant_role = 'CLAS' " + 
+			"	and (SYSDATE <= r.effective_to  " + 
+			"	or r.effective_to is null)  " + 
+			"	and r.effective_from <= SYSDATE";
+	
+	public String getnmiClassificationTypeFromPremnum(Integer premnum) throws TaskException{
+		
+		Connection conn		         = null;
+		PreparedStatement stmt       = null;
+		ResultSet rs		         = null;
+		String nmiClassification     = null;
+		
+		try {
+			conn = getEnergyConnection();
+			stmt = conn.prepareStatement(SELECT_NMI_CLASSIFICATION_FROM_PREMNUM);
+			stmt.setInt(1, premnum);
+			
+			rs = stmt.executeQuery();
+
+			while (rs.next()) {
+				nmiClassification = rs.getString(1);
+			}
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting the premnum on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+
+		return nmiClassification;
+	}
+	
+	private static final String SELECT_IS_UNIQUE_SERVICE_ID_EXIST =
+			" select 1 from ENERGYDB.pm_extref_mktid " + 
+			"   where ext_sdp_code_upper = ?         " + 
+			"   and trim(participant_role) = ?       " + 
+			"   and effective_from <= ?              " + 
+			"   and (   effective_to IS NULL         " + 
+			"        or effective_to >= SYSDATE      " + 
+			"   )";
+					
+	public boolean isUniqueServiceIdExist(Transaction transaction) throws TaskException {
+
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		boolean result 		   = false;
+		
+		String uniqueServiceId = transaction.getTransactionData().getUniqueServiceIdentifier();
+		long readingStartTime = transaction.getServices().getServiceArray(0).getServiceStartDateTime().getTime().getTime();
+		
+		try {
+			conn = getEnergyConnection();
+			stmt = conn.prepareStatement(SELECT_IS_UNIQUE_SERVICE_ID_EXIST);
+			stmt.setString(1, uniqueServiceId);
+			stmt.setString(2, MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME);
+			stmt.setDate(3, new java.sql.Date (readingStartTime));
+			rs = stmt.executeQuery();
+			result = rs.next();
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting the unique service id on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+		return result;
+	}
+
+	private static final String SELECT_IS_METER_EXIST =
+			" select 1 FROM energydb.PM_COMMS_METERS meter	" + 
+			" JOIN ENERGYDB.PM_EXTREF_MKTID mkt         	" + 
+			"   ON mkt.PREMNUM = meter.PREMNUM          	" + 
+			"   AND PARTICIPANT_ROLE = ?          			" + 
+			"   AND EXT_SDP_CODE = ?				       	" + 
+			"   AND EFFECTIVE_FROM <= ?               		" + 
+			"   AND (EFFECTIVE_TO IS NULL OR EFFECTIVE_TO >= SYSDATE)" +
+			"   AND INITIAL_INSTALL_DATE <= ?               " + 
+			"   AND (removal_date IS NULL or removal_date >= ?) " + 
+			" JOIN energydb.PM_COMMS_METERS_INFO info    	" + 
+			"   ON meter.oid = info.COMMS_METER_OID         " + 
+			"	AND ACTUAL_CHANGE_DATE <= ?					" + 
+			"	AND (ACTUAL_END_DATE IS NULL OR ACTUAL_END_DATE >= ?) " ;
+	
+	public boolean isMeterExist(Transaction transaction) throws TaskException {
+		
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		boolean result 		   = false;
+		
+		String uniqueServiceId = transaction.getTransactionData().getUniqueServiceIdentifier();
+		long readingStartTime = transaction.getServices().getServiceArray(0).getServiceStartDateTime().getTime().getTime();
+		long readingEndTime = transaction.getServices().getServiceArray(0).getServiceEndDateTime().getTime().getTime();
+		try {
+			conn = getEnergyConnection();
+			stmt = conn.prepareStatement(SELECT_IS_METER_EXIST);
+			stmt.setString(1, MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME);
+			stmt.setString(2, uniqueServiceId);
+			stmt.setDate(3, new java.sql.Date (readingStartTime));
+			stmt.setDate(4, new java.sql.Date (readingStartTime));
+			stmt.setDate(5, new java.sql.Date (readingEndTime));
+			stmt.setDate(6, new java.sql.Date (readingStartTime));
+			stmt.setDate(7, new java.sql.Date (readingEndTime));
+			
+			rs = stmt.executeQuery();
+			result = rs.next();
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting the unique service identifier on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+		return result;
+	}
+			
+	private static final String SELECT_REGISTER_SUFFIXES =
+			" SELECT DISTINCT REGISTER_ID              	" + 
+			" FROM ENERGYDB.PM_COMMS_METERS meter     	" + 
+			" JOIN ENERGYDB.PM_EXTREF_MKTID mkt     	" + 
+			"   ON meter.PREMNUM = mkt.PREMNUM 		 	" + 
+			"   AND PARTICIPANT_ROLE = ?              	" + 
+			"   AND EXT_SDP_CODE = ?                  	" + 
+			"   AND EFFECTIVE_FROM <= ?               	" + 
+			"   AND (EFFECTIVE_TO IS NULL OR EFFECTIVE_TO >= SYSDATE)" +
+			"   AND INITIAL_INSTALL_DATE <= ?           " + 
+			"   AND (removal_date IS NULL or removal_date >= ?)" +
+			" JOIN ENERGYDB.PM_COMMS_REGISTERS reg 	  	" + 
+			"   ON meter.OID = reg.COMMS_METER_OID    	" + 
+			"   AND (REGISTER_END_DATE IS NULL OR REGISTER_END_DATE >= ?) " ;
+	
+	public boolean isRegistersValid(Transaction transaction) throws TaskException {
+		
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		
+		String uniqueServiceId = transaction.getTransactionData().getUniqueServiceIdentifier();
+		long readingStartTime = transaction.getServices().getServiceArray(0).getServiceStartDateTime().getTime().getTime();
+		long readingEndTime = transaction.getServices().getServiceArray(0).getServiceEndDateTime().getTime().getTime();
+
+		try {
+			List<String> registerSuffixesFromFile = transaction.getServices().getServiceList().stream()
+					.flatMap(service -> service.getMeters().getMeterList().stream())
+					.flatMap(meter -> meter.getRegisters().getRegisterList().stream())
+					.map(Register::getRegisterSuffix)
+					.collect(Collectors.toList());
+			
+			if (logger.isDebugEnabled()) {
+				logger.debug("Registers in MV90 file: " + registerSuffixesFromFile);
+			}
+			
+			if(registerSuffixesFromFile.isEmpty()) {
+				return false;
+			}
+			
+			List<String> registerSuffixesFromQuery = new ArrayList<>();
+			conn = getEnergyConnection();
+			stmt = conn.prepareStatement(SELECT_REGISTER_SUFFIXES);
+			stmt.setString(1, MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME);
+			stmt.setString(2, uniqueServiceId);
+			stmt.setDate(3, new java.sql.Date (readingStartTime));
+			stmt.setDate(4, new java.sql.Date (readingStartTime));
+			stmt.setDate(5, new java.sql.Date (readingEndTime));
+			stmt.setDate(6, new java.sql.Date (readingEndTime));
+			
+			rs = stmt.executeQuery();
+			while (rs.next()){
+				registerSuffixesFromQuery.add(rs.getString(1));
+			}
+			
+			return registerSuffixesFromQuery.containsAll(registerSuffixesFromFile);
+			
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting parameters on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+	}
+	
+	private static final String SELECT_IS_REGISTER_STANDING_DATA_MATCH =
+			" SELECT 1 FROM ENERGYDB.PM_COMMS_METERS meter " + 
+			" JOIN ENERGYDB.PM_EXTREF_MKTID mkt            " + 
+			"   ON meter.PREMNUM = mkt.PREMNUM             " + 
+			"   AND PARTICIPANT_ROLE = ?                   " + 
+			"   AND EXT_SDP_CODE = ?                       " + 
+			"   AND EFFECTIVE_FROM <= ?                    " + 
+			"   AND (EFFECTIVE_TO IS NULL or EFFECTIVE_TO >= SYSDATE) " +
+			"   AND INITIAL_INSTALL_DATE <= ?			   " + 
+			"   AND (removal_date IS NULL or removal_date >= ?)" +
+			" JOIN ENERGYDB.PM_COMMS_REGISTERS reg         " + 
+			"   ON meter.OID = reg.COMMS_METER_OID         " + 
+			"   AND REGISTER_ID = ?                        " + 
+			"   AND MDM_SUFFIX = ?                         " + 
+			"   AND reg.MULTIPLIER = ?                     " + 
+			"   AND UNIT_OF_MEASURE = ?                    " +
+			"   AND (REGISTER_END_DATE IS NULL OR REGISTER_END_DATE >= ?) " ;
+	
+	public boolean isStandingDataMatch(Transaction transaction) throws TaskException {
+
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		
+		String uniqueServiceId = transaction.getTransactionData().getUniqueServiceIdentifier();
+		try {
+			conn = getEnergyConnection();
+			
+			Services services = transaction.getServices();
+			for(Service service : services.getServiceList()) {
+				Meters meters = service.getMeters();
+				for(Meter meter : meters.getMeterList()) {
+					Registers registers = meter.getRegisters();
+					for(Register register : registers.getRegisterList()) {
+						long readingStartTime = register.getServiceStartDateTime().getTime().getTime();
+						long readingEndTime = register.getServiceEndDateTime().getTime().getTime();
+						stmt = conn.prepareStatement(SELECT_IS_REGISTER_STANDING_DATA_MATCH);
+						stmt.setString(1, MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME);
+						stmt.setString(2, uniqueServiceId);
+						stmt.setDate(3, new Date(readingStartTime));
+						stmt.setDate(4, new java.sql.Date (readingStartTime));
+						stmt.setDate(5, new java.sql.Date (readingEndTime));
+						stmt.setString(6, register.getRegisterSuffix());
+						stmt.setString(7, register.getRegisterSuffix());
+						stmt.setBigDecimal(8, register.getMultiplier());
+						stmt.setString(9, register.getUnitOfMeasureCode());
+						stmt.setDate(10, new java.sql.Date (readingEndTime));
+						rs = stmt.executeQuery();
+						if(!rs.next()) {
+							return false;
+						}
+					}
+				}
+			}
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting parameters on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+		return true;
+	}
+
+	private static final String SELECT_IS_REGISTER_PRIOR_TO_START_DATE = 
+			" select 1 FROM energydb.PM_COMMS_METERS meter	" + 
+			" JOIN ENERGYDB.PM_EXTREF_MKTID pem      		" + 
+			"   ON pem.PREMNUM = meter.PREMNUM          	" + 
+			"   AND PARTICIPANT_ROLE = ?          			" + 
+			"   AND EXT_SDP_CODE = ?				    	" + 
+			"   AND EFFECTIVE_FROM <= ?        				" + 
+			"   AND (EFFECTIVE_TO IS NULL or EFFECTIVE_TO >= SYSDATE) " +
+			"   AND INITIAL_INSTALL_DATE <= ?           	" + 
+			"   AND (removal_date IS NULL or removal_date >= ?)" +
+			" JOIN energydb.PM_COMMS_REGISTERS reg			" + 
+			"   ON meter.oid = reg.COMMS_METER_OID      	" + 
+			"   AND REGISTER_ID = ?  				 		" + 
+			"   AND ? < reg.REGISTER_START_DATE 			" ; 
+
+	public boolean isReadingsStartDateValid(Transaction transaction) throws TaskException {
+
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		
+		String uniqueServiceId = transaction.getTransactionData().getUniqueServiceIdentifier();
+		
+		try {
+			conn = getEnergyConnection();
+			
+			Services services = transaction.getServices();
+			for(Service service : services.getServiceList()) {
+				Meters meters = service.getMeters();
+				for(Meter meter : meters.getMeterList()) {
+					Registers registers = meter.getRegisters();
+					for(Register register : registers.getRegisterList()) {
+						long readingStartTime = register.getServiceStartDateTime().getTime().getTime();
+						long readingEndTime = register.getServiceEndDateTime().getTime().getTime();
+						stmt = conn.prepareStatement(SELECT_IS_REGISTER_PRIOR_TO_START_DATE);
+						stmt.setString(1, MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME);
+						stmt.setString(2, uniqueServiceId);
+						stmt.setDate(3, new Date(readingStartTime));
+						stmt.setDate(4, new java.sql.Date (readingStartTime));
+						stmt.setDate(5, new java.sql.Date (readingEndTime));
+						stmt.setString(6, register.getRegisterSuffix());
+						stmt.setDate(7, new Date(readingStartTime));
+						rs = stmt.executeQuery();
+						if(rs.next()) {
+							return false;
+						}
+					}
+				}
+			}
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting parameters on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+		return true;
+	}
+
+	private static final String SELECT_IS_REGISTER_INTERVAL_LENGTH_MATCH =
+			" select 1 FROM energydb.PM_COMMS_METERS meter	" + 
+			" JOIN ENERGYDB.PM_EXTREF_MKTID pem      		" + 
+			"   ON pem.PREMNUM = meter.PREMNUM          	" + 
+			"   AND PARTICIPANT_ROLE = ?          			" + 
+			"   AND EXT_SDP_CODE = ?				    	" + 
+			"   AND EFFECTIVE_FROM <= ?        				" + 
+			"   AND (EFFECTIVE_TO IS NULL or EFFECTIVE_TO >= SYSDATE) " +
+			"   AND INITIAL_INSTALL_DATE <= ?			    " + 
+			"   AND (removal_date IS NULL or removal_date >= ?)" + 
+			" JOIN energydb.PM_COMMS_REGISTERS reg			" + 
+			"   ON meter.OID = reg.COMMS_METER_OID      	" + 
+			"   AND REGISTER_ID = ?  				 		" + 
+			"   AND REGISTER_START_DATE <= ? 				" + 
+			"   AND (REGISTER_END_DATE IS NULL OR REGISTER_END_DATE >= ?) " +
+			" JOIN ENERGYDB.PM_COMMS_INTERVAL_LENGTH length " + 
+			"   ON meter.OID = length.COMMS_METER_OID       " + 
+			"   AND INTERVAL_LENGTH = ?                     " + 
+			"   AND length.START_DATE >= REGISTER_START_DATE" ;
+	
+	public boolean isIntervalLengthMatch(Transaction transaction) throws TaskException {
+
+		Connection conn		   = null;
+		PreparedStatement stmt = null;
+		ResultSet rs		   = null;
+		
+		String uniqueServiceId = transaction.getTransactionData().getUniqueServiceIdentifier();
+		
+		try {
+			conn = getEnergyConnection();
+			
+			Services services = transaction.getServices();
+			for(Service service : services.getServiceList()) {
+				Meters meters = service.getMeters();
+				for(Meter meter : meters.getMeterList()) {
+					Registers registers = meter.getRegisters();
+					for(Register register : registers.getRegisterList()) {
+						long readingStartTime = register.getServiceStartDateTime().getTime().getTime();
+						long readingEndTime = register.getServiceEndDateTime().getTime().getTime();
+						stmt = conn.prepareStatement(SELECT_IS_REGISTER_INTERVAL_LENGTH_MATCH);
+						stmt.setString(1, MKT_SPECIFIC_UNIQUE_SERVICE_ID_NAME);
+						stmt.setString(2, uniqueServiceId);
+						stmt.setDate(3, new Date (readingStartTime));
+						stmt.setDate(4, new Date (readingStartTime));
+						stmt.setDate(5, new Date (readingEndTime));
+						stmt.setString(6, register.getRegisterSuffix());
+						stmt.setDate(7, new Date (readingStartTime));
+						stmt.setDate(8, new Date (readingEndTime));
+						stmt.setString(9, register.getIntervalLength());
+						rs = stmt.executeQuery();
+						if(!rs.next()) {
+							return false;
+						}
+					}
+				}
+			}
+		} catch (SQLException e) {
+			throw new TaskException("Unable to create a prepared statement when setting parameters on the query", e);
+		} finally {
+			closeConnection(conn, stmt, rs);
+		}
+		return true;
+	}
+	
+}
